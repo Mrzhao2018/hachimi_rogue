@@ -1,5 +1,4 @@
 import copy
-from tkinter import E
 import tcod
 
 from engine import Engine
