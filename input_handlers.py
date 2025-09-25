@@ -1,11 +1,32 @@
-from typing import Optional, Any
+from __future__ import annotations
+
+from typing import Optional, Any, TYPE_CHECKING
 
 import tcod.event
 
 from actions import Action, EscapeAction, BumpAction
 
+if TYPE_CHECKING:
+    from engine import Engine
+
 
 class EventHandler:
+    def __init__(self, engine: Engine):
+        self.engine = engine
+
+    def handle_events(self) -> None:
+        for event in tcod.event.wait():
+            action = self.dispatch(event)
+
+            if action is None:
+                continue
+
+            action.perform()
+
+            self.engine.handle_enemy_turns()
+            self.engine.update_fov()
+
+
     def dispatch(self, event: Any) -> Optional[Action]:
         """Dispatch an event to an `ev_*` method (replacement for EventDispatch).
 
@@ -71,17 +92,19 @@ class EventHandler:
 
         key = event.sym
 
+        player = self.engine.player
+
         if key == tcod.event.KeySym.UP:
-            action = BumpAction(dx=0, dy=-1)
+            action = BumpAction(player, dx=0, dy=-1)
         elif key == tcod.event.KeySym.DOWN:
-            action = BumpAction(dx=0, dy=1)
+            action = BumpAction(player, dx=0, dy=1)
         elif key == tcod.event.KeySym.LEFT:
-            action = BumpAction(dx=-1, dy=0)
+            action = BumpAction(player, dx=-1, dy=0)
         elif key == tcod.event.KeySym.RIGHT:
-            action = BumpAction(dx=1, dy=0)
+            action = BumpAction(player, dx=1, dy=0)
 
         elif key == tcod.event.KeySym.ESCAPE:
-            action = EscapeAction()
+            action = EscapeAction(player)
 
         
         return action
