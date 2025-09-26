@@ -52,15 +52,16 @@ class EventHandler:
     def __init__(self, engine: Engine):
         self.engine = engine
 
-    def handle_events(self) -> None:
-        raise NotImplementedError()
+    def handle_events(self, context: tcod.context.Context) -> None:
+        for event in tcod.event.wait():
+            context.convert_event(event)
+            self.dispatch(event)
     
     def ev_quit(self, event: tcod.event.Quit) -> Optional[Action]:
         raise SystemExit()
-
-    def ev_keyup(self, event: tcod.event.KeyUp) -> Optional[Action]:
-        """No-op handler for key release events in the base EventHandler."""
-        return None
+    
+    def on_render(self, console: tcod.console.Console) -> None:
+        self.engine.render(console)
     
     def dispatch(self, event: Any) -> Optional[Action]:
         """Dispatch an event to an `ev_*` method (replacement for EventDispatch).
@@ -86,28 +87,12 @@ class EventHandler:
             warnings.warn(f"{func_name} is missing from this EventHandler object.", RuntimeWarning, stacklevel=2)
             return None
         return func(event)
-
-class MainGameEventHandler(EventHandler):
-    def handle_events(self) -> None:
-        for event in tcod.event.wait():
-            action = self.dispatch(event)
-
-            if action is None:
-                continue
-
-            action.perform()
-
-            self.engine.handle_enemy_turns()
-            self.engine.update_fov()
-
-
-    def ev_windowclose(self, event: tcod.event.WindowEvent) -> Optional[Action]:
-        """Handle window manager close request the same as quit."""
-        raise SystemExit()
-
-    # No-op handlers for common events we don't need to handle explicitly.
-    def ev_mousemotion(self, event: tcod.event.MouseMotion) -> Optional[Action]:
+    
+    def ev_keyup(self, event: tcod.event.KeyUp) -> Optional[Action]:
+        """No-op handler for key release events."""
         return None
+    
+    # No-op handlers for common events we don't need to handle explicitly.
 
     def ev_mousebuttondown(self, event: tcod.event.MouseButtonDown) -> Optional[Action]:
         return None
@@ -133,6 +118,30 @@ class MainGameEventHandler(EventHandler):
     def ev_windowfocuslost(self, event: tcod.event.WindowEvent) -> Optional[Action]:
         return None
     
+    def ev_mousemotion(self, event: tcod.event.MouseMotion) -> None:
+        if self.engine.game_map.in_bounds(int(event.position.x), int(event.position.y)):
+            self.engine.mouse_location = int(event.position.x), int(event.position.y)
+
+class MainGameEventHandler(EventHandler):
+    def handle_events(self, context: tcod.context.Context) -> None:
+        for event in tcod.event.wait():
+            context.convert_event(event)
+            action = self.dispatch(event)
+
+            if action is None:
+                continue
+
+            action.perform()
+
+            self.engine.handle_enemy_turns()
+            self.engine.update_fov()
+
+
+    def ev_windowclose(self, event: tcod.event.WindowEvent) -> Optional[Action]:
+        """Handle window manager close request the same as quit."""
+        raise SystemExit()
+
+    
     def ev_keydown(self, event: tcod.event.KeyDown) -> Action | None:
         action: Optional[Action] = None
 
@@ -150,16 +159,15 @@ class MainGameEventHandler(EventHandler):
         elif key == tcod.event.KeySym.ESCAPE:
             action = EscapeAction(player)
 
+        elif key == tcod.event.KeySym.V:
+            self.engine.event_handler = HistoryViewer(self.engine)
+
         
         return action
-
-    def ev_keyup(self, event: tcod.event.KeyUp) -> Optional[Action]:
-        """No-op handler for key release events."""
-        return None
     
 
 class GameOverEventHandler(EventHandler):
-    def handle_events(self) -> None:
+    def handle_events(self, context: tcod.context.Context) -> None:
         for event in tcod.event.wait():
             action = self.dispatch(event)
 
@@ -178,3 +186,62 @@ class GameOverEventHandler(EventHandler):
             action = EscapeAction(self.engine.player)
 
         return action
+    
+
+CURSOR_Y_KEYS = {
+    tcod.event.KeySym.UP: -1,
+    tcod.event.KeySym.DOWN: 1,
+    tcod.event.KeySym.PAGEUP: -10,
+    tcod.event.KeySym.PAGEDOWN: 10,
+}
+
+
+class HistoryViewer(EventHandler):
+    """Print the history on a larger window which can be navigated."""
+
+    def __init__(self, engine: Engine):
+        super().__init__(engine)
+        self.log_length = len(engine.message_log.messages)
+        self.cursor = self.log_length - 1
+
+    def on_render(self, console: tcod.console.Console) -> None:
+        super().on_render(console)  # Draw the main state as the background.
+
+        log_console = tcod.console.Console(console.width - 6, console.height - 6)
+
+        # Draw a frame with a custom banner title.
+        log_console.draw_frame(0, 0, log_console.width, log_console.height)
+        log_console.print_box(
+            0, 0, log_console.width, 1, "┤Message history├", alignment=tcod.constants.CENTER
+        )
+
+        # Render the message log using the cursor parameter.
+        self.engine.message_log.render_messages(
+            log_console,
+            1,
+            1,
+            log_console.width - 2,
+            log_console.height - 2,
+            self.engine.message_log.messages[: self.cursor + 1],
+        )
+        log_console.blit(console, 3, 3)
+
+    def ev_keydown(self, event: tcod.event.KeyDown) -> None:
+        # Fancy conditional movement to make it feel right.
+        if event.sym in CURSOR_Y_KEYS:
+            adjust = CURSOR_Y_KEYS[event.sym]
+            if adjust < 0 and self.cursor == 0:
+                # Only move from the top to the bottom when you're on the edge.
+                self.cursor = self.log_length - 1
+            elif adjust > 0 and self.cursor == self.log_length - 1:
+                # Same with bottom to top movement.
+                self.cursor = 0
+            else:
+                # Otherwise move while staying clamped to the bounds of the history log.
+                self.cursor = max(0, min(self.cursor + adjust, self.log_length - 1))
+        elif event.sym == tcod.event.KeySym.HOME:
+            self.cursor = 0  # Move directly to the top message.
+        elif event.sym == tcod.event.KeySym.END:
+            self.cursor = self.log_length - 1  # Move directly to the last message.
+        else:  # Any other key moves back to the main game state.
+            self.engine.event_handler = MainGameEventHandler(self.engine)
